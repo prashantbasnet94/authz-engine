@@ -1,0 +1,68 @@
+{
+  "name": "@prashantbasnet/rbac",
+  "version": "1.0.0",
+  "description": "Zero-boilerplate, high-performance RBAC system with O(1) permission checking, hierarchical inheritance, and semantic API generation",
+  "license": "MIT",
+  "author": "Prashant Basnet",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/prashantbasnet/rbac"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run build && npm run test && npm run lint",
+    "demo": "ts-node demo-server.ts"
+  },
+  "keywords": [
+    "rbac",
+    "authorization",
+    "permissions",
+    "access-control",
+    "middleware",
+    "fastify",
+    "express",
+    "security",
+    "typescript"
+  ],
+  "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "fastify": "^4.29.1",
+    "jest": "^29.5.0",
+    "pino-pretty": "^10.3.1",
+    "ts-jest": "^29.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "lodash": "^4.17.21"
+  },
+  "peerDependencies": {
+    "fastify": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "fastify": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ]
+}
