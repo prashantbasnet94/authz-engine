@@ -19,7 +19,7 @@
     "lint:fix": "eslint src --ext .ts --fix",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run typecheck && npm run build && npm run test && npm run lint",
-    "demo": "ts-node demo-server.ts"
+    "demo": "ts-node src/demo-server.ts"
   },
   "keywords": [
     "rbac",

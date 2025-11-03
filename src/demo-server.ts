@@ -9,7 +9,7 @@
  */
 
 import Fastify from 'fastify';
-import { PermissionService, PermissionVisualizer, DEFAULT_RBAC_CONFIG } from './src';
+import { PermissionService, PermissionVisualizer, DEFAULT_RBAC_CONFIG } from './index';
 
 const app = Fastify({
   logger: {
@@ -92,7 +92,9 @@ app.get('/api/graph-data', async (request, reply) => {
  *   "requiredPermission": "users:read"
  * }
  */
-app.post<any, any, { userPermissions: string[]; requiredPermission: string }>(
+app.post<
+  { Body: { userPermissions: string[]; requiredPermission: string } }
+>(
   '/api/check-permission',
   async (request, reply) => {
     const { userPermissions, requiredPermission } = request.body;
