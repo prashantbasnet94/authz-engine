@@ -34,7 +34,8 @@ app.get('/', async (request, reply) => {
   return {
     message: '👋 Welcome to RBAC Visualizer Demo',
     endpoints: {
-      visualization: 'http://localhost:3000/graph',
+      module_hierarchy: 'http://localhost:3000/hierarchy',
+      permission_graph: 'http://localhost:3000/graph',
       api_data: 'http://localhost:3000/api/graph-data',
       permission_checker: 'POST http://localhost:3000/api/check-permission'
     },
@@ -65,6 +66,25 @@ app.get('/graph', async (request, reply) => {
   ].join('; '));
 
   const html = visualizer.generateHTMLVisualization();
+  reply.type('text/html').send(html);
+});
+
+/**
+ * Module Hierarchy Visualization
+ * View in browser: http://localhost:3000/hierarchy
+ */
+app.get('/hierarchy', async (request, reply) => {
+  // Override CSP to allow vis-network from CDN
+  reply.header('Content-Security-Policy', [
+    "default-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "script-src 'self' 'unsafe-inline' https://unpkg.com",
+    "img-src 'self' data: https:",
+    "connect-src 'self'",
+    "font-src 'self'"
+  ].join('; '));
+
+  const html = visualizer.generateModuleHierarchyVisualization();
   reply.type('text/html').send(html);
 });
 
@@ -178,8 +198,9 @@ async function start() {
     console.log('║                                                            ║');
     console.log('╚════════════════════════════════════════════════════════════╝');
     console.log('\n');
-    console.log('📊 Interactive Graph Visualization:');
-    console.log(`   👉 http://localhost:${port}/graph\n`);
+    console.log('📊 Visualizations:');
+    console.log(`   📦 Module Hierarchy: http://localhost:${port}/hierarchy`);
+    console.log(`   🔗 Permission Graph: http://localhost:${port}/graph\n`);
     console.log('📡 API Endpoints:');
     console.log(`   GET  http://localhost:${port}/api/graph-data`);
     console.log(`   POST http://localhost:${port}/api/check-permission`);

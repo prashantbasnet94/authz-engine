@@ -6,7 +6,7 @@
   "author": "Prashant Basnet",
   "repository": {
     "type": "git",
-    "url": "https://github.com/prashantbasnet/rbac"
+    "url": "https://github.com/prashantbasnet94/AuthzEngine"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
