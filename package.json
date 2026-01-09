@@ -1,12 +1,12 @@
 {
-  "name": "@prashantbasnet/rbac",
+  "name": "authz-engine",
   "version": "1.0.0",
   "description": "Zero-boilerplate, high-performance RBAC system with O(1) permission checking, hierarchical inheritance, and semantic API generation",
   "license": "MIT",
   "author": "Prashant Basnet",
   "repository": {
     "type": "git",
-    "url": "https://github.com/prashantbasnet94/AuthzEngine"
+    "url": "git+https://github.com/prashantbasnet94/AuthzEngine.git"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
