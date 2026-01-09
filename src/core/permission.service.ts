@@ -13,6 +13,7 @@ export class PermissionService {
   private readonly ACTION_HIERARCHY: Record<string, string[]>;
   
   // Public proxy for fluent API
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   public readonly can: any;
   
   // Internal map for O(1) semantic method lookup
@@ -111,9 +112,6 @@ export class PermissionService {
 
       const parts = resourcePart.split('.');
       
-      // Calculate Capitalized Action (e.g., "read" -> "Read")
-      const capAction = this.capitalize(action);
-
       if (parts.length === 1) {
         // Module level: "users:read" -> "readUsers"
         const moduleName = this.capitalize(parts[0]);
