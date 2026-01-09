@@ -4,15 +4,13 @@
 
 /**
  * RBAC Configuration - Define modules and their resources
- * @example
- * {
- *   users: ['create', 'read', 'update', 'delete'],
- *   posts: ['create', 'read', 'update', 'delete'],
- *   comments: ['create', 'read', 'update']
- * }
  */
 export interface RBACConfig {
-  [module: string]: string[];
+  modules: {
+    [module: string]: string[];
+  };
+  roles?: Record<string, Role>;
+  hierarchy?: Record<string, string[]>;
 }
 
 /**
@@ -33,17 +31,18 @@ export interface Permission {
   id: string;
   module: string;
   resource?: string;
-  action: Action;
+  action: Action | '*';
   description?: string;
 }
 
 /**
- * Role definition with permissions
+ * Role definition with permissions and inheritance
  */
 export interface Role {
   id: string;
   name: string;
   permissions: PermissionString[];
+  inherits?: string[];
   description?: string;
 }
 
