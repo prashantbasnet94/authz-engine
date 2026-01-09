@@ -9,36 +9,174 @@ export class PermissionService {
   private graph: PermissionGraph;
   private allPermissions: Set<string>;
   private config: RBACConfig;
-  private readonly ACTIONS = ['create', 'read', 'update', 'delete'];
-  private readonly ACTION_HIERARCHY: Record<string, string[]> = {
-    delete: ['delete', 'update', 'create', 'read'],
-    update: ['update', 'create', 'read'],
-    create: ['create', 'read'],
-    read: ['read']
-  };
+  private readonly ACTIONS: string[];
+  private readonly ACTION_HIERARCHY: Record<string, string[]>;
+  
+  // Public proxy for fluent API
+  public readonly can: any;
+  
+  // Internal map for O(1) semantic method lookup
+  private methodMap: Map<string, string>;
 
   constructor(config: RBACConfig) {
     this.config = config;
+
+    // Initialize hierarchy and actions based on config or defaults
+    if (config.hierarchy) {
+      this.ACTION_HIERARCHY = config.hierarchy;
+      this.ACTIONS = Object.keys(config.hierarchy);
+    } else {
+      this.ACTION_HIERARCHY = {
+        delete: ['update', 'create', 'read'],
+        update: ['create', 'read'],
+        create: ['read'],
+        read: []
+      };
+      this.ACTIONS = ['delete', 'update', 'create', 'read'];
+    }
+
     this.allPermissions = this.generateAllPermissions(config);
+    this.validateRolePermissions();
     this.graph = this.buildPermissionGraph(config);
+    this.detectCircularDependencies();
     this.applyFloydWarshallTransitiveClosure();
+    
+    // Initialize semantic methods
+    this.methodMap = new Map();
+    this.generateSemanticMethods();
+    
+    // Initialize Proxy
+    this.can = new Proxy({}, {
+      get: (target, prop: string) => {
+        return (userPermissions: string[] | Set<string>, context?: EnrichedContext) => {
+          const permission = this.methodMap.get(prop);
+          if (!permission) {
+             throw new Error(`Method '${prop}' does not exist or matches no permission.`);
+          }
+          return this.hasPermission(userPermissions, permission, context);
+        };
+      }
+    });
+  }
+
+  /**
+   * Validate that all permissions assigned to roles actually exist
+   */
+  private validateRolePermissions(): void {
+    if (!this.config.roles) return;
+    console.log('Validating roles...', Object.keys(this.config.roles));
+
+    Object.entries(this.config.roles).forEach(([roleId, role]) => {
+      // 1. Validate assigned permissions
+      role.permissions.forEach(permission => {
+        console.log(`Checking permission: ${permission} in role ${roleId}`);
+        // Handle "role:" prefix check for nested roles
+        if (permission.startsWith('role:')) {
+           if (!this.allPermissions.has(permission)) {
+             throw new Error(`Invalid role reference '${permission}' in role '${roleId}'. Role does not exist.`);
+           }
+           return;
+        }
+
+        if (!this.allPermissions.has(permission)) {
+          console.log(`Found invalid permission! ${permission}`);
+          throw new Error(`Invalid permission '${permission}' found in role '${roleId}'. This permission does not exist in the configured modules or hierarchy.`);
+        }
+      });
+
+      // 2. Validate inherited roles
+      if (role.inherits) {
+        role.inherits.forEach(inheritedRole => {
+          const rolePermission = `role:${inheritedRole}`;
+          if (!this.allPermissions.has(rolePermission)) {
+             throw new Error(`Role '${roleId}' inherits from non-existent role '${inheritedRole}'.`);
+          }
+        });
+      }
+    });
+  }
+
+  /**
+   * Generate semantic method names for all permissions
+   */
+  private generateSemanticMethods(): void {
+    // 1. Track resource usage to detect duplicates for short names
+    this.allPermissions.forEach(permission => {
+      // Skip wildcards
+      if (permission.includes('*')) return;
+      if (permission.startsWith('role:')) return;
+
+      const [resourcePart, action] = permission.split(':');
+      if (!resourcePart || !action) return;
+
+      const parts = resourcePart.split('.');
+      
+      // Calculate Capitalized Action (e.g., "read" -> "Read")
+      const capAction = this.capitalize(action);
+
+      if (parts.length === 1) {
+        // Module level: "users:read" -> "readUsers"
+        const moduleName = this.capitalize(parts[0]);
+        const methodName = `${action}${moduleName}`;
+        this.methodMap.set(methodName, permission);
+      } else if (parts.length === 2) {
+        // Resource level: "store.orders:read" 
+        const moduleName = this.capitalize(parts[0]);
+        const resourceName = this.capitalize(parts[1]);
+
+        // Long name: "readStoreOrders" (Always generated, always safe)
+        const longName = `${action}${moduleName}${resourceName}`;
+        this.methodMap.set(longName, permission);
+      }
+    });
+    
+    // Better Uniqueness Check using Config
+    const resourceCounts = new Map<string, number>();
+    Object.values(this.config.modules).forEach(resources => {
+      resources.forEach(resource => {
+        resourceCounts.set(resource, (resourceCounts.get(resource) || 0) + 1);
+      });
+    });
+
+    // Generate Short Names
+    Object.entries(this.config.modules).forEach(([module, resources]) => {
+      resources.forEach(resource => {
+        // If resource is unique (count === 1), generate short methods
+        if (resourceCounts.get(resource) === 1) {
+           this.ACTIONS.forEach(action => {
+             const permission = `${module}.${resource}:${action}`;
+             // Short name: "readOrders"
+             const methodName = `${action}${this.capitalize(resource)}`;
+             // Only set if not already taken (precaution)
+             if (!this.methodMap.has(methodName)) {
+               this.methodMap.set(methodName, permission);
+             }
+           });
+        }
+      });
+    });
+  }
+
+  private capitalize(str: string): string {
+    return str.charAt(0).toUpperCase() + str.slice(1);
   }
 
   /**
    * Generate all possible permissions from config
-   * @param config - RBAC configuration
-   * @returns Set of all permission strings
    */
   private generateAllPermissions(config: RBACConfig): Set<string> {
     const permissions = new Set<string>();
 
-    // Add wildcard permissions
+    // Add wildcard permissions (*:read, etc.)
     this.ACTIONS.forEach(action => {
       permissions.add(`*:${action}`);
     });
 
     // Add module and resource permissions
-    Object.entries(config).forEach(([module, resources]) => {
+    Object.entries(config.modules).forEach(([module, resources]) => {
+      // Resource-level wildcard (e.g., "users:*")
+      permissions.add(`${module}:*`);
+
       // Module-level permissions (e.g., "users:read")
       this.ACTIONS.forEach(action => {
         permissions.add(`${module}:${action}`);
@@ -46,11 +184,19 @@ export class PermissionService {
 
       // Resource-level permissions (e.g., "users.profile:read")
       resources.forEach(resource => {
+        permissions.add(`${module}.${resource}:*`);
         this.ACTIONS.forEach(action => {
           permissions.add(`${module}.${resource}:${action}`);
         });
       });
     });
+
+    // Add roles as permission nodes
+    if (config.roles) {
+      Object.keys(config.roles).forEach(roleId => {
+        permissions.add(`role:${roleId}`);
+      });
+    }
 
     return permissions;
   }
@@ -62,7 +208,6 @@ export class PermissionService {
     const grants = new Map<string, Set<string>>();
     const grantedBy = new Map<string, Set<string>>();
 
-    // Helper to add grant relationship
     const addGrant = (grantor: string, grantee: string) => {
       if (!grants.has(grantor)) grants.set(grantor, new Set());
       if (!grantedBy.has(grantee)) grantedBy.set(grantee, new Set());
@@ -71,84 +216,114 @@ export class PermissionService {
       grantedBy.get(grantee)!.add(grantor);
     };
 
-    // 1. Build CRUD hierarchy within each resource
-    Object.entries(config).forEach(([module, resources]) => {
-      resources.forEach(resource => {
-        const resourceName = `${module}.${resource}`;
-
-        // Within a resource: delete > update > create > read
-        addGrant(`${resourceName}:delete`, `${resourceName}:update`);
-        addGrant(`${resourceName}:delete`, `${resourceName}:create`);
-        addGrant(`${resourceName}:delete`, `${resourceName}:read`);
-        addGrant(`${resourceName}:update`, `${resourceName}:create`);
-        addGrant(`${resourceName}:update`, `${resourceName}:read`);
-        addGrant(`${resourceName}:create`, `${resourceName}:read`);
-      });
-    });
-
-    // 2. Module-level permissions cascade to resources
-    Object.entries(config).forEach(([module, resources]) => {
-      this.ACTIONS.forEach(action => {
-        const modulePermission = `${module}:${action}`;
-
-        resources.forEach(resource => {
-          const resourcePermission = `${module}.${resource}:${action}`;
-          addGrant(modulePermission, resourcePermission);
+    // 1. Build CRUD hierarchy within each resource/module
+    const applyHierarchy = (prefix: string) => {
+      // Iterate through the hierarchy configuration
+      Object.entries(this.ACTION_HIERARCHY).forEach(([action, impliedActions]) => {
+        impliedActions.forEach(impliedAction => {
+          addGrant(`${prefix}:${action}`, `${prefix}:${impliedAction}`);
         });
       });
-    });
 
-    // 3. Module-level CRUD hierarchy
-    Object.keys(config).forEach(module => {
-      addGrant(`${module}:delete`, `${module}:update`);
-      addGrant(`${module}:delete`, `${module}:create`);
-      addGrant(`${module}:delete`, `${module}:read`);
-      addGrant(`${module}:update`, `${module}:create`);
-      addGrant(`${module}:update`, `${module}:read`);
-      addGrant(`${module}:create`, `${module}:read`);
-    });
-
-    // 4. Wildcard permissions based on hierarchy
-    Object.entries(this.ACTION_HIERARCHY).forEach(([action, grantedActions]) => {
-      const wildcardPermission = `*:${action}`;
-
-      // Grant specific permissions
-      this.allPermissions.forEach(permission => {
-        const permissionAction = permission.split(':')[1];
-        if (grantedActions.includes(permissionAction)) {
-          addGrant(wildcardPermission, permission);
-        }
+      // Support for resource-level wildcard
+      this.ACTIONS.forEach(action => {
+        addGrant(`${prefix}:*`, `${prefix}:${action}`);
       });
+    };
 
-      // Grant wildcard permissions
-      grantedActions.forEach(grantedAction => {
-        if (grantedAction !== action) {
-          addGrant(wildcardPermission, `*:${grantedAction}`);
-        }
+    // Apply to global wildcard
+    applyHierarchy('*');
+
+    Object.entries(config.modules).forEach(([module, resources]) => {
+      applyHierarchy(module);
+
+      resources.forEach(resource => {
+        const resourceName = `${module}.${resource}`;
+        applyHierarchy(resourceName);
+
+        // Module-level permissions cascade to resources
+        this.ACTIONS.forEach(action => {
+          addGrant(`${module}:${action}`, `${resourceName}:${action}`);
+        });
+        addGrant(`${module}:*`, `${resourceName}:*`);
       });
     });
+
+    // 2. Global wildcard permissions cascade to specific modules
+    this.ACTIONS.forEach(action => {
+      const globalAction = `*:${action}`;
+      Object.keys(config.modules).forEach(module => {
+        addGrant(globalAction, `${module}:${action}`);
+      });
+    });
+
+    // 3. Role Inheritance and Permissions
+    if (config.roles) {
+      Object.entries(config.roles).forEach(([roleId, role]) => {
+        const roleNode = `role:${roleId}`;
+
+        // Role grants its permissions
+        role.permissions.forEach(permission => {
+          addGrant(roleNode, permission);
+        });
+
+        // Role inheritance
+        if (role.inherits) {
+          role.inherits.forEach(parentRole => {
+            addGrant(roleNode, `role:${parentRole}`);
+          });
+        }
+      });
+    }
 
     return { grants, grantedBy };
   }
 
   /**
+   * Detect circular dependencies in the graph before transitive closure
+   */
+  private detectCircularDependencies(): void {
+    const visited = new Set<string>();
+    const stack = new Set<string>();
+
+    const check = (node: string) => {
+      if (stack.has(node)) {
+        throw new Error(`Circular dependency detected involving node: ${node}`);
+      }
+      if (visited.has(node)) return;
+
+      visited.add(node);
+      stack.add(node);
+
+      const targets = this.graph.grants.get(node);
+      if (targets) {
+        for (const target of targets) {
+          check(target);
+        }
+      }
+
+      stack.delete(node);
+    };
+
+    for (const node of this.allPermissions) {
+      check(node);
+    }
+  }
+
+  /**
    * Floyd-Warshall algorithm to compute transitive closure
-   * Transforms direct relationships into all reachable relationships
-   * O(n³) at startup, enables O(1) lookups at runtime
    */
   private applyFloydWarshallTransitiveClosure(): void {
     const allPermissions = Array.from(this.allPermissions);
 
-    // For each intermediate node
     for (const k of allPermissions) {
-      // For each source node
       for (const i of allPermissions) {
-        // For each destination node
-        for (const j of allPermissions) {
-          // If i -> k and k -> j, then i -> j
-          if (this.graph.grants.get(i)?.has(k) && this.graph.grants.get(k)?.has(j)) {
-            this.graph.grants.get(i)?.add(j);
-            this.graph.grantedBy.get(j)?.add(i);
+        if (this.graph.grants.get(i)?.has(k)) {
+          for (const j of allPermissions) {
+            if (this.graph.grants.get(k)?.has(j)) {
+              this.graph.grants.get(i)?.add(j);
+              this.graph.grantedBy.get(j)?.add(i);
+            }
           }
         }
       }
@@ -157,30 +332,27 @@ export class PermissionService {
 
   /**
    * Check if user has required permission
-   * O(1) lookup via pre-computed graph
    */
   hasPermission(
     userPermissions: readonly string[] | string[] | Set<string>,
     requiredPermission: string,
-    context?: EnrichedContext
+    _context?: EnrichedContext
   ): boolean {
     const permissionSet = userPermissions instanceof Set ? userPermissions : new Set(userPermissions);
 
-    // Direct permission check
-    if (permissionSet.has(requiredPermission)) {
-      return true;
-    }
-
-    // Check if any user permission grants the required permission
-    for (const userPerm of permissionSet) {
-      const grants = this.graph.grants.get(userPerm);
-      if (grants && grants.has(requiredPermission)) {
-        return true;
+    for (let userPerm of permissionSet) {
+      // Auto-prefix roles if they are passed by ID only
+      if (this.config.roles && this.config.roles[userPerm] && !userPerm.startsWith('role:')) {
+        userPerm = `role:${userPerm}`;
       }
+
+      if (userPerm === requiredPermission) return true;
+      if (this.graph.grants.get(userPerm)?.has(requiredPermission)) return true;
     }
 
     return false;
   }
+
 
   /**
    * Get all effective permissions (including inherited)
@@ -229,12 +401,12 @@ export class PermissionService {
       totalGrants += grants.size;
     });
 
-    const resourceCount = Object.values(this.config).reduce((sum, resources) => sum + resources.length, 0);
+    const resourceCount = Object.values(this.config.modules).reduce((sum, resources) => sum + resources.length, 0);
 
     return {
       totalPermissions: this.allPermissions.size,
       grantRelationships: totalGrants,
-      modules: Object.keys(this.config).length,
+      modules: Object.keys(this.config.modules).length,
       resources: resourceCount,
       actions: this.ACTIONS.length
     };
@@ -267,10 +439,9 @@ export class PermissionService {
   checkPermissionDetailed(
     userPermissions: string[],
     requiredPermission: string,
-    context?: EnrichedContext
+    _context?: EnrichedContext
   ): PermissionCheckResult {
-    const allowed = this.hasPermission(userPermissions, requiredPermission, context);
-    const effective = this.getEffectivePermissions(userPermissions);
+    const allowed = this.hasPermission(userPermissions, requiredPermission, _context);
 
     return {
       allowed,
