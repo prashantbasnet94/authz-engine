@@ -18,9 +18,14 @@ export type {
   Action,
   Permission,
   Role,
+  RolePermissionEntry,
+  ConditionalPermission,
+  Predicate,
+  PermissionServiceOptions,
   PermissionGraph,
   RBACStats,
   PermissionCheckResult,
+  PermissionMatch,
   ValidationResult,
   EnrichedContext
 } from './types';

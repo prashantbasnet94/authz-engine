@@ -3,7 +3,24 @@
  * Uses Floyd-Warshall algorithm to pre-compute all permission relationships
  */
 
-import { RBACConfig, PermissionGraph, RBACStats, PermissionCheckResult, EnrichedContext } from '../types';
+import {
+  RBACConfig,
+  PermissionGraph,
+  RBACStats,
+  PermissionCheckResult,
+  EnrichedContext,
+  PermissionServiceOptions,
+  Predicate,
+  ConditionalPermission,
+  RolePermissionEntry,
+  PermissionMatch
+} from '../types';
+
+type ConditionalGrant = { permission: string; predicates: string[] };
+
+type EvaluationResult =
+  | { allowed: true; match: PermissionMatch }
+  | { allowed: false; evaluated: { name: string; passed: boolean }[] };
 
 export class PermissionService {
   private graph: PermissionGraph;
@@ -11,16 +28,21 @@ export class PermissionService {
   private config: RBACConfig;
   private readonly ACTIONS: string[];
   private readonly ACTION_HIERARCHY: Record<string, string[]>;
-  
+
+  private predicates: Map<string, Predicate>;
+  private conditionalGrants: Map<string, ConditionalGrant[]>;
+
   // Public proxy for fluent API
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   public readonly can: any;
-  
+
   // Internal map for O(1) semantic method lookup
   private methodMap: Map<string, string>;
 
-  constructor(config: RBACConfig) {
+  constructor(config: RBACConfig, options: PermissionServiceOptions = {}) {
     this.config = config;
+    this.predicates = new Map(Object.entries(options.predicates ?? {}));
+    this.conditionalGrants = new Map();
 
     // Initialize hierarchy and actions based on config or defaults
     if (config.hierarchy) {
@@ -41,14 +63,14 @@ export class PermissionService {
     this.graph = this.buildPermissionGraph(config);
     this.detectCircularDependencies();
     this.applyFloydWarshallTransitiveClosure();
-    
+
     // Initialize semantic methods
     this.methodMap = new Map();
     this.generateSemanticMethods();
-    
+
     // Initialize Proxy
     this.can = new Proxy({}, {
-      get: (target, prop: string) => {
+      get: (_target, prop: string) => {
         return (userPermissions: string[] | Set<string>, context?: EnrichedContext) => {
           const permission = this.methodMap.get(prop);
           if (!permission) {
@@ -61,31 +83,37 @@ export class PermissionService {
   }
 
   /**
-   * Validate that all permissions assigned to roles actually exist
+   * Validate that all permissions assigned to roles actually exist,
+   * and that any referenced predicates are registered.
    */
   private validateRolePermissions(): void {
     if (!this.config.roles) return;
-    console.log('Validating roles...', Object.keys(this.config.roles));
 
     Object.entries(this.config.roles).forEach(([roleId, role]) => {
-      // 1. Validate assigned permissions
-      role.permissions.forEach(permission => {
-        console.log(`Checking permission: ${permission} in role ${roleId}`);
-        // Handle "role:" prefix check for nested roles
+      role.permissions.forEach(entry => {
+        const { permission, predicates } = this.normalizeRoleEntry(entry);
+
         if (permission.startsWith('role:')) {
-           if (!this.allPermissions.has(permission)) {
-             throw new Error(`Invalid role reference '${permission}' in role '${roleId}'. Role does not exist.`);
-           }
-           return;
+          if (predicates.length > 0) {
+            throw new Error(`Role '${roleId}' cannot attach conditions to a role reference '${permission}'. Conditions belong on concrete permissions.`);
+          }
+          if (!this.allPermissions.has(permission)) {
+            throw new Error(`Invalid role reference '${permission}' in role '${roleId}'. Role does not exist.`);
+          }
+          return;
         }
 
         if (!this.allPermissions.has(permission)) {
-          console.log(`Found invalid permission! ${permission}`);
           throw new Error(`Invalid permission '${permission}' found in role '${roleId}'. This permission does not exist in the configured modules or hierarchy.`);
+        }
+
+        for (const predName of predicates) {
+          if (!this.predicates.has(predName)) {
+            throw new Error(`Role '${roleId}' references unknown predicate '${predName}' on permission '${permission}'. Register it via PermissionServiceOptions.predicates.`);
+          }
         }
       });
 
-      // 2. Validate inherited roles
       if (role.inherits) {
         role.inherits.forEach(inheritedRole => {
           const rolePermission = `role:${inheritedRole}`;
@@ -95,6 +123,18 @@ export class PermissionService {
         });
       }
     });
+  }
+
+  /**
+   * Normalize a role permission entry (string or ConditionalPermission) into a common shape.
+   */
+  private normalizeRoleEntry(entry: RolePermissionEntry): { permission: string; predicates: string[] } {
+    if (typeof entry === 'string') {
+      return { permission: entry, predicates: [] };
+    }
+    const cond = entry as ConditionalPermission;
+    const predicates = Array.isArray(cond.when) ? cond.when : [cond.when];
+    return { permission: cond.permission, predicates };
   }
 
   /**
@@ -260,12 +300,19 @@ export class PermissionService {
       Object.entries(config.roles).forEach(([roleId, role]) => {
         const roleNode = `role:${roleId}`;
 
-        // Role grants its permissions
-        role.permissions.forEach(permission => {
-          addGrant(roleNode, permission);
+        role.permissions.forEach(entry => {
+          const { permission, predicates } = this.normalizeRoleEntry(entry);
+          if (predicates.length === 0) {
+            // Plain grant becomes an unconditional edge, participates in FW closure.
+            addGrant(roleNode, permission);
+          } else {
+            // Conditional grants live outside the graph; evaluated at check-time.
+            const list = this.conditionalGrants.get(roleNode) ?? [];
+            list.push({ permission, predicates });
+            this.conditionalGrants.set(roleNode, list);
+          }
         });
 
-        // Role inheritance
         if (role.inherits) {
           role.inherits.forEach(parentRole => {
             addGrant(roleNode, `role:${parentRole}`);
@@ -334,21 +381,89 @@ export class PermissionService {
   hasPermission(
     userPermissions: readonly string[] | string[] | Set<string>,
     requiredPermission: string,
-    _context?: EnrichedContext
+    context?: EnrichedContext
   ): boolean {
+    return this.evaluate(userPermissions, requiredPermission, context).allowed;
+  }
+
+  /**
+   * Core evaluator. Returns whether the check passed and how it was decided.
+   * Unconditional path: user permission (or its transitive grants) equals required.
+   * Conditional path: user reaches a role whose conditional grant reaches required,
+   *                   AND every predicate on that grant evaluates true against ctx.
+   */
+  private evaluate(
+    userPermissions: readonly string[] | string[] | Set<string>,
+    requiredPermission: string,
+    context?: EnrichedContext
+  ): EvaluationResult {
     const permissionSet = userPermissions instanceof Set ? userPermissions : new Set(userPermissions);
+    const evaluatedPredicates: { name: string; passed: boolean }[] = [];
 
     for (let userPerm of permissionSet) {
-      // Auto-prefix roles if they are passed by ID only
       if (this.config.roles && this.config.roles[userPerm] && !userPerm.startsWith('role:')) {
         userPerm = `role:${userPerm}`;
       }
 
-      if (userPerm === requiredPermission) return true;
-      if (this.graph.grants.get(userPerm)?.has(requiredPermission)) return true;
+      // Unconditional path
+      if (userPerm === requiredPermission || this.graph.grants.get(userPerm)?.has(requiredPermission)) {
+        return {
+          allowed: true,
+          match: { userPermission: userPerm, path: 'unconditional' }
+        };
+      }
+
+      // Conditional path: only role nodes can carry conditional grants.
+      // Walk every role reachable from userPerm (including itself), check their conditional grants.
+      const reachable = new Set<string>([userPerm]);
+      const transitive = this.graph.grants.get(userPerm);
+      if (transitive) transitive.forEach(n => reachable.add(n));
+
+      for (const node of reachable) {
+        if (!node.startsWith('role:')) continue;
+        const grants = this.conditionalGrants.get(node);
+        if (!grants) continue;
+
+        for (const { permission, predicates } of grants) {
+          const reachesRequired =
+            permission === requiredPermission ||
+            this.graph.grants.get(permission)?.has(requiredPermission);
+          if (!reachesRequired) continue;
+
+          const predicateResults = predicates.map(name => ({
+            name,
+            passed: this.runPredicate(name, context)
+          }));
+          predicateResults.forEach(r => evaluatedPredicates.push(r));
+
+          if (predicateResults.every(r => r.passed)) {
+            return {
+              allowed: true,
+              match: {
+                userPermission: userPerm,
+                path: 'conditional',
+                conditionalPermission: permission,
+                predicates: predicateResults
+              }
+            };
+          }
+        }
+      }
     }
 
-    return false;
+    return { allowed: false, evaluated: evaluatedPredicates };
+  }
+
+  private runPredicate(name: string, context?: EnrichedContext): boolean {
+    const fn = this.predicates.get(name);
+    // Validated at construction, but guard defensively.
+    if (!fn) return false;
+    if (!context) return false;
+    try {
+      return fn(context) === true;
+    } catch {
+      return false;
+    }
   }
 
 
@@ -432,20 +547,44 @@ export class PermissionService {
   }
 
   /**
-   * Check permission with detailed result
+   * Check permission and return the derivation chain (which user permission matched,
+   * unconditional vs. conditional, and predicate outcomes).
    */
   checkPermissionDetailed(
     userPermissions: string[],
     requiredPermission: string,
-    _context?: EnrichedContext
+    context?: EnrichedContext
   ): PermissionCheckResult {
-    const allowed = this.hasPermission(userPermissions, requiredPermission, _context);
+    const result = this.evaluate(userPermissions, requiredPermission, context);
+
+    if (result.allowed) {
+      const { match } = result;
+      const reason =
+        match.path === 'unconditional'
+          ? `Granted via '${match.userPermission}' (unconditional).`
+          : `Granted via '${match.userPermission}' → conditional grant on '${match.conditionalPermission}' with predicates [${(match.predicates ?? []).map(p => p.name).join(', ')}].`;
+
+      return {
+        allowed: true,
+        permission: requiredPermission,
+        userPermissions,
+        reason,
+        matchedVia: match,
+        evaluatedPredicates: match.predicates
+      };
+    }
+
+    const failed = result.evaluated.filter(p => !p.passed);
+    const reason = failed.length > 0
+      ? `Denied. Reachable conditional grants failed predicates: [${failed.map(p => p.name).join(', ')}].`
+      : `Denied. No user permission grants '${requiredPermission}'.`;
 
     return {
-      allowed,
+      allowed: false,
       permission: requiredPermission,
       userPermissions,
-      reason: allowed ? 'Permission granted' : `User does not have required permission: ${requiredPermission}`
+      reason,
+      evaluatedPredicates: result.evaluated.length > 0 ? result.evaluated : undefined
     };
   }
 }

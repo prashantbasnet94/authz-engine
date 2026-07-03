@@ -36,14 +36,41 @@ export interface Permission {
 }
 
 /**
+ * A predicate evaluated against the request context at check-time.
+ * All predicates on a ConditionalPermission must return true for the grant to apply.
+ */
+export type Predicate = (ctx: EnrichedContext) => boolean;
+
+/**
+ * A permission grant guarded by one or more named predicates.
+ * The referenced predicate name(s) must be registered in PermissionServiceOptions.predicates.
+ */
+export interface ConditionalPermission {
+  permission: PermissionString;
+  when: string | string[];
+}
+
+/**
+ * A permission entry on a role: either a plain permission string, or a conditional grant.
+ */
+export type RolePermissionEntry = PermissionString | ConditionalPermission;
+
+/**
  * Role definition with permissions and inheritance
  */
 export interface Role {
   id: string;
   name: string;
-  permissions: PermissionString[];
+  permissions: RolePermissionEntry[];
   inherits?: string[];
   description?: string;
+}
+
+/**
+ * Runtime options for PermissionService
+ */
+export interface PermissionServiceOptions {
+  predicates?: Record<string, Predicate>;
 }
 
 /**
@@ -68,6 +95,16 @@ export interface RBACStats {
 }
 
 /**
+ * Explains how a permission check was decided.
+ */
+export interface PermissionMatch {
+  userPermission: string;
+  path: 'unconditional' | 'conditional';
+  conditionalPermission?: string;
+  predicates?: { name: string; passed: boolean }[];
+}
+
+/**
  * Permission check result with context
  */
 export interface PermissionCheckResult {
@@ -75,6 +112,8 @@ export interface PermissionCheckResult {
   permission: string;
   userPermissions: string[];
   reason?: string;
+  matchedVia?: PermissionMatch;
+  evaluatedPredicates?: { name: string; passed: boolean }[];
 }
 
 /**
@@ -87,7 +126,8 @@ export interface ValidationResult {
 }
 
 /**
- * Enriched context for permission checks
+ * Enriched context for permission checks.
+ * Passed to Predicates so conditional grants can inspect request/resource state.
  */
 export interface EnrichedContext {
   userId?: string;
@@ -96,5 +136,7 @@ export interface EnrichedContext {
   method?: string;
   ip?: string;
   timestamp?: Date;
+  resource?: unknown;
+  resourceType?: string;
   metadata?: Record<string, unknown>;
 }
